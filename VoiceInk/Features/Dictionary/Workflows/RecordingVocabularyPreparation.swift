@@ -19,7 +19,8 @@ final class RecordingVocabularyPreparation {
             guard !Task.isCancelled else { return saved }
             let names = RecordingVocabulary.screenNames(in: text, language: language)
             guard !Task.isCancelled else { return saved }
-            return RecordingVocabulary(savedTerms: saved.terms, screenNames: names)
+            return RecordingVocabulary(
+                savedTerms: saved.savedTerms, screenNames: names, savedAliases: saved.savedAliases)
         }
 
         preparationTask = Task {

@@ -16,8 +16,14 @@ struct RecordingVocabulary: Sendable {
     private static let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "VocabularyCorrection")
 
     let terms: [String]
+    /// The user's saved dictionary only, without names read from the screen. Acoustic
+    /// vocabulary boosting uses these, because each extra term is another chance to
+    /// rewrite an ordinary word.
+    let savedTerms: [String]
+    /// Misrecognitions saved as replacement rules for a dictionary term, keyed by that term.
+    let savedAliases: [String: [String]]
 
-    init(savedTerms: [String] = [], screenNames: [String] = []) {
+    init(savedTerms: [String] = [], screenNames: [String] = [], savedAliases: [String: [String]] = [:]) {
         var seen = Set<String>()
         // Saved spellings win collisions and retain priority when providers limit hints.
         terms = (savedTerms + screenNames).compactMap { value in
@@ -26,6 +32,8 @@ struct RecordingVocabulary: Sendable {
             guard !term.isEmpty, seen.insert(key).inserted else { return nil }
             return term
         }
+        self.savedTerms = savedTerms
+        self.savedAliases = savedAliases
     }
 
     var enhancementSection: String {

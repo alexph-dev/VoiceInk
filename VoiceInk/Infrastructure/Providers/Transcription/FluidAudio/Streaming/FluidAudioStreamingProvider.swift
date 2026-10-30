@@ -33,7 +33,10 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
     private let minNewSamples = ASRConstants.minimumRequiredSamples(forSampleRate: ASRConstants.sampleRate)
 
     var stopDisposition: StreamingStopDisposition {
-        confirmationLock.withLock {
+        // Dictionary words are checked against the audio only in a whole-file pass, so with
+        // vocabulary correction on every dictation ends with one. Measured: about 0.5 s for 95 s.
+        if ParakeetVocabularyBooster.isEnabled { return .useBatchFallback }
+        return confirmationLock.withLock {
             confirmedSegmentCount < minimumConfirmedSegmentsForStreamingFinalization
                 ? .useBatchFallback
                 : .finalizeStreaming

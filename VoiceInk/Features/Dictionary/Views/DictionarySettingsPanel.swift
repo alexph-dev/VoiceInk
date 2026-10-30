@@ -54,7 +54,7 @@ struct DictionarySettingsPanel: View {
                 } header: {
                     HStack(spacing: 4) {
                         Text("Vocabulary")
-                        InfoTip("Locally corrects words using your vocabulary and names on screen with similar spelling or sound.")
+                        InfoTip("Locally corrects words using your vocabulary and names on screen with similar spelling or sound. With Parakeet it also checks your vocabulary against the recording, using a 98 MB model downloaded once.")
                             .accessibilityLabel("Learn about Vocabulary Correction")
                     }
                 }
