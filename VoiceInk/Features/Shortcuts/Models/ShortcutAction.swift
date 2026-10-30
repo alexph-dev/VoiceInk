@@ -6,6 +6,8 @@ enum ShortcutAction: Hashable, Sendable {
     case pasteLastTranscription
     case pasteLastEnhancement
     case retryLastTranscription
+    /// Slot number from `RetryModeSlot`, starting at 1.
+    case retryLastTranscriptionWithMode(Int)
     case cancelRecorder
     case openQuickHistory
     case quickAddToDictionary
@@ -39,6 +41,9 @@ enum ShortcutAction: Hashable, Sendable {
             return "pasteLastEnhancement"
         case .retryLastTranscription:
             return "retryLastTranscription"
+        case .retryLastTranscriptionWithMode(let slot):
+            // Slot 1 keeps the original key so an existing shortcut carries over.
+            return slot == 1 ? "retryLastTranscriptionWithMode" : "retryLastTranscriptionWithMode\(slot)"
         case .cancelRecorder:
             return "cancelRecorder"
         case .openQuickHistory:
@@ -68,6 +73,8 @@ enum ShortcutAction: Hashable, Sendable {
             return String(localized: "Paste Last Enhanced Transcription")
         case .retryLastTranscription:
             return String(localized: "Retry Last Transcription")
+        case .retryLastTranscriptionWithMode(let slot):
+            return String(format: String(localized: "Retry with Mode %@"), "\(slot)")
         case .cancelRecorder:
             return String(localized: "Cancel Recording")
         case .openQuickHistory:
@@ -93,13 +100,10 @@ enum ShortcutAction: Hashable, Sendable {
         }
     }
 
-    static let globalUtilityActions: [Self] = [
-        .pasteLastTranscription,
-        .pasteLastEnhancement,
-        .retryLastTranscription,
-        .openQuickHistory,
-        .quickAddToDictionary,
-    ]
+    static let globalUtilityActions: [Self] =
+        [.pasteLastTranscription, .pasteLastEnhancement, .retryLastTranscription]
+        + RetryModeSlot.all.map(\.shortcutAction)
+        + [.openQuickHistory, .quickAddToDictionary]
 
     static let recorderPanelStoredActions: [Self] = [
         .cancelRecorder

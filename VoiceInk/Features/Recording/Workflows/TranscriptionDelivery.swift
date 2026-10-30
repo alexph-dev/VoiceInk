@@ -55,6 +55,23 @@ final class TranscriptionDelivery {
         }
     }
 
+    /// Delivers a retried transcription the way its Mode delivers a new dictation: runs the Mode's
+    /// custom command, or pastes at the cursor for every other output.
+    /// - Returns: Why the custom command failed, if it did.
+    func deliverRetry(_ text: String, output: OutputRuntimeConfiguration) async -> Error? {
+        guard output.outputMode == .customCommand else {
+            _ = await CursorPaster.startPasteAtCursor(pastedText(from: text)).value
+            return nil
+        }
+
+        guard let command = output.customCommand?.trimmedCommand else {
+            notifyCustomCommandFailure(CustomCommandDeliveryError.commandNotConfigured)
+            return CustomCommandDeliveryError.commandNotConfigured
+        }
+
+        return await runCustomCommand(command: command, commandText: deliverableText(from: text), finishAndSendKey: .none)
+    }
+
     private func deliverFollowUp(_ item: Request, actions: Actions) async {
         SoundManager.shared.playStopSound()
 
@@ -105,11 +122,14 @@ final class TranscriptionDelivery {
         await actions.dismiss()
 
         Task {
-            await runCustomCommand(command: command, commandText: commandText, finishAndSendKey: finishAndSendKey)
+            _ = await runCustomCommand(command: command, commandText: commandText, finishAndSendKey: finishAndSendKey)
         }
     }
 
-    private func runCustomCommand(command: String, commandText: String, finishAndSendKey: FinishAndSendKey) async {
+    /// - Returns: Why the command failed, or nil when it succeeded.
+    private func runCustomCommand(command: String, commandText: String, finishAndSendKey: FinishAndSendKey) async
+        -> Error?
+    {
         let startTime = Date()
         logger.notice("Custom command started")
 
@@ -144,8 +164,10 @@ final class TranscriptionDelivery {
                 try await Task.sleep(nanoseconds: 150_000_000)
                 CursorPaster.performSendKey(finishAndSendKey)
             }
+            return nil
         } catch {
             notifyCustomCommandFailure(error, duration: Date().timeIntervalSince(startTime))
+            return error
         }
     }
 
@@ -165,14 +187,12 @@ final class TranscriptionDelivery {
     }
 
     private func paste(_ text: String, sendKey: FinishAndSendKey, actions: Actions) async {
-        let textToPaste = deliverableText(from: text)
-        let appendSpace = UserDefaults.standard.bool(forKey: "AppendTrailingSpace")
-        let pastedText = textToPaste + (appendSpace ? " " : "")
+        let textToPaste = pastedText(from: text)
         actions.setState(.idle)
         SoundManager.shared.playStopSound()
         await actions.dismiss()
 
-        let pasteTask = CursorPaster.startPasteAtCursor(pastedText, sendKey: sendKey)
+        let pasteTask = CursorPaster.startPasteAtCursor(textToPaste, sendKey: sendKey)
 
         Task { @MainActor in
             let pasteOutcome = await pasteTask.value
@@ -185,6 +205,11 @@ final class TranscriptionDelivery {
                 CursorPaster.performSendKey(sendKey)
             }
         }
+    }
+
+    private func pastedText(from text: String) -> String {
+        let appendSpace = UserDefaults.standard.bool(forKey: "AppendTrailingSpace")
+        return deliverableText(from: text) + (appendSpace ? " " : "")
     }
 
     private func deliverableText(from text: String) -> String {

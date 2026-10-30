@@ -1,6 +1,29 @@
 import Foundation
 import SwiftData
 
+/// One "Retry with Mode" shortcut: the Mode it retries with, and whether the result goes through
+/// that Mode's output (paste or custom command) instead of the clipboard.
+struct RetryModeSlot: Identifiable {
+    static let all = (1...3).map(RetryModeSlot.init(number:))
+
+    let number: Int
+    var id: Int { number }
+
+    // Slot 1 keeps the keys of the original single shortcut so existing settings carry over.
+    private var keySuffix: String { number == 1 ? "" : "\(number)" }
+    var modeIDKey: String { "retryLastTranscriptionModeID" + keySuffix }
+    var deliversModeOutputKey: String { "retryLastTranscriptionDeliversModeOutput" + keySuffix }
+    var shortcutAction: ShortcutAction { .retryLastTranscriptionWithMode(number) }
+
+    var selectedModeID: UUID? {
+        UserDefaults.standard.string(forKey: modeIDKey).flatMap(UUID.init(uuidString:))
+    }
+
+    var deliversModeOutput: Bool {
+        UserDefaults.standard.bool(forKey: deliversModeOutputKey)
+    }
+}
+
 class LastTranscriptionService: ObservableObject {
 
     static func getLastTranscription(from modelContext: ModelContext) -> Transcription? {
@@ -102,9 +125,41 @@ class LastTranscriptionService: ObservableObject {
         }
     }
 
+    /// Retries the last recording with the slot's Mode, so the language, model, and enhancement
+    /// of that Mode replace the active Mode's for this one retry.
     static func retryLastTranscription(
+        with slot: RetryModeSlot,
         from modelContext: ModelContext, transcriptionModelManager: TranscriptionModelManager,
         serviceRegistry: TranscriptionServiceRegistry, enhancementService: AIEnhancementService?
+    ) {
+        Task { @MainActor in
+            guard let modeID = slot.selectedModeID,
+                let mode = ModeManager.shared.getConfiguration(with: modeID)
+            else {
+                NotificationManager.shared.showNotification(
+                    title: String(localized: "Choose a mode for this shortcut in Settings"),
+                    type: .error
+                )
+                return
+            }
+
+            retryLastTranscription(
+                from: modelContext,
+                transcriptionModelManager: transcriptionModelManager,
+                serviceRegistry: serviceRegistry,
+                enhancementService: enhancementService,
+                mode: mode,
+                deliversModeOutput: slot.deliversModeOutput
+            )
+        }
+    }
+
+    /// - Parameter deliversModeOutput: Paste the result or run the Mode's custom command, as a new
+    ///   dictation in that Mode would. Otherwise the result is copied to the clipboard.
+    static func retryLastTranscription(
+        from modelContext: ModelContext, transcriptionModelManager: TranscriptionModelManager,
+        serviceRegistry: TranscriptionServiceRegistry, enhancementService: AIEnhancementService?,
+        mode: ModeConfig? = nil, deliversModeOutput: Bool = false
     ) {
         Task { @MainActor in
             guard let lastTranscription = getLastTranscription(from: modelContext),
@@ -122,6 +177,7 @@ class LastTranscriptionService: ObservableObject {
 
             guard
                 let transcriptionConfiguration = ModeRuntimeResolver.transcriptionConfiguration(
+                    mode: mode,
                     transcriptionModelManager: transcriptionModelManager
                 )
             else {
@@ -138,17 +194,44 @@ class LastTranscriptionService: ObservableObject {
                 serviceRegistry: serviceRegistry,
                 enhancementService: enhancementService
             )
+
+            if let mode {
+                NotificationManager.shared.showNotification(
+                    title: String(format: String(localized: "Retrying with %@ mode…"), mode.name),
+                    type: .info,
+                    duration: 10.0
+                )
+            }
+
             do {
                 let result = try await transcriptionService.retranscribeAudio(
                     from: audioURL,
-                    using: transcriptionConfiguration.model
+                    using: transcriptionConfiguration.model,
+                    mode: mode
                 )
                 let newTranscription = result.transcription
 
-                let textToCopy =
+                let resultText =
                     result.enhancementFailure == nil && newTranscription.enhancedText?.isEmpty == false
                     ? newTranscription.enhancedText! : newTranscription.text
-                _ = ClipboardManager.copyToClipboard(textToCopy)
+
+                let outputMode = deliversModeOutput ? mode : nil
+                if let outputMode {
+                    NotificationManager.shared.dismissNotification()
+                    if let deliveryError = await TranscriptionDelivery().deliverRetry(
+                        resultText,
+                        output: ModeRuntimeResolver.outputConfiguration(mode: outputMode)
+                    ) {
+                        NotificationManager.shared.showNotification(
+                            title: (deliveryError as? LocalizedError)?.errorDescription
+                                ?? deliveryError.localizedDescription,
+                            type: .error
+                        )
+                        return
+                    }
+                } else {
+                    _ = ClipboardManager.copyToClipboard(resultText)
+                }
 
                 if let enhancementFailure = result.enhancementFailure {
                     NotificationManager.shared.showNotification(
@@ -157,7 +240,7 @@ class LastTranscriptionService: ObservableObject {
                         ),
                         type: .warning
                     )
-                } else {
+                } else if outputMode == nil {
                     NotificationManager.shared.showNotification(
                         title: String(localized: "Copied to clipboard"),
                         type: .success
