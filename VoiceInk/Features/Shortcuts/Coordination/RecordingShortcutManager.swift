@@ -273,6 +273,14 @@ class RecordingShortcutManager: ObservableObject {
                 serviceRegistry: engine.serviceRegistry,
                 enhancementService: engine.enhancementService
             )
+        case .retryLastTranscriptionWithMode(let slot):
+            LastTranscriptionService.retryLastTranscription(
+                with: RetryModeSlot(number: slot),
+                from: engine.modelContext,
+                transcriptionModelManager: engine.transcriptionModelManager,
+                serviceRegistry: engine.serviceRegistry,
+                enhancementService: engine.enhancementService
+            )
         case .openQuickHistory:
             QuickHistoryController.shared.show(modelContext: engine.modelContext, engine: engine)
         case .quickAddToDictionary:

@@ -66,12 +66,42 @@ struct CustomModelBackup: Codable {
     }
 }
 
+/// Settings of one "Retry with Mode" shortcut slot.
+struct RetryWithModeSlotBackup: Codable {
+    let slot: Int
+    let shortcut: ShortcutBackup?
+    let modeID: String?
+    let deliversModeOutput: Bool?
+
+    init(_ slot: RetryModeSlot) {
+        self.slot = slot.number
+        shortcut = ShortcutStore.shortcut(for: slot.shortcutAction).map(ShortcutBackup.init)
+        modeID = slot.selectedModeID?.uuidString
+        deliversModeOutput = slot.deliversModeOutput
+    }
+
+    func restore() {
+        guard let target = RetryModeSlot.all.first(where: { $0.number == slot }) else { return }
+
+        if let shortcut {
+            ShortcutStore.setShortcut(shortcut.shortcut, for: target.shortcutAction)
+        }
+        if let modeID {
+            UserDefaults.standard.set(modeID, forKey: target.modeIDKey)
+        }
+        if let deliversModeOutput {
+            UserDefaults.standard.set(deliversModeOutput, forKey: target.deliversModeOutputKey)
+        }
+    }
+}
+
 struct GeneralBackup: Codable {
     let primaryRecordingShortcut: ShortcutBackup?
     let secondaryRecordingShortcut: ShortcutBackup?
     let pasteLastTranscriptionShortcut: ShortcutBackup?
     let pasteLastEnhancementShortcut: ShortcutBackup?
     let retryLastTranscriptionShortcut: ShortcutBackup?
+    let retryWithModeSlots: [RetryWithModeSlotBackup]?
     let cancelRecorderShortcut: ShortcutBackup?
     let openHistoryWindowShortcut: ShortcutBackup?
     let quickAddToDictionaryShortcut: ShortcutBackup?

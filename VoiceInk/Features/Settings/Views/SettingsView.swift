@@ -104,6 +104,10 @@ struct SettingsView: View {
                     .controlSize(.small)
                 }
 
+                ForEach(RetryModeSlot.all) { slot in
+                    RetryWithModeShortcutRow(slot: slot)
+                }
+
                 LabeledContent {
                     HStack(spacing: 8) {
                         ShortcutRecorder(
@@ -357,6 +361,77 @@ struct SettingsView: View {
         }
         .labelsHidden()
         .fixedSize()
+    }
+}
+
+/// One "Retry with Mode" shortcut: the Mode to retry with, whether to deliver the result through
+/// that Mode's output, and the shortcut itself.
+private struct RetryWithModeShortcutRow: View {
+    let slot: RetryModeSlot
+    @EnvironmentObject private var recordingShortcutManager: RecordingShortcutManager
+    @ObservedObject private var modeManager = ModeManager.shared
+    @AppStorage private var modeID: String
+    @AppStorage private var deliversModeOutput: Bool
+
+    init(slot: RetryModeSlot) {
+        self.slot = slot
+        _modeID = AppStorage(wrappedValue: "", slot.modeIDKey)
+        _deliversModeOutput = AppStorage(wrappedValue: false, slot.deliversModeOutputKey)
+    }
+
+    var body: some View {
+        LabeledContent {
+            HStack(spacing: 8) {
+                Picker("Mode", selection: modeSelection) {
+                    Text("Select Mode").tag("")
+                    ForEach(modeManager.configurations) { mode in
+                        Text(mode.name).tag(mode.id.uuidString)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+
+                Toggle(isOn: $deliversModeOutput) {
+                    if runsCustomCommand {
+                        Text("Run command")
+                    } else {
+                        Text("Paste")
+                    }
+                }
+                .toggleStyle(.checkbox)
+                .help(
+                    runsCustomCommand
+                        ? "Run this mode's custom command with the result. When off, the result is copied to the clipboard."
+                        : "Paste the result at the cursor. When off, the result is copied to the clipboard."
+                )
+
+                ShortcutRecorder(action: slot.shortcutAction) {
+                    recordingShortcutManager.updateShortcutStatus()
+                }
+                .controlSize(.small)
+            }
+        } label: {
+            HStack(spacing: 2) {
+                Text(slot.shortcutAction.displayName)
+                if slot.number == 1 {
+                    InfoTip(
+                        "Transcribes the last recording again using the language, model, and enhancement of the selected mode. Use it when automatic language detection picks the wrong language, for example with a mode set to English. With the checkbox on, the result is pasted or sent to the mode's custom command; otherwise it is copied to the clipboard."
+                    )
+                }
+            }
+        }
+    }
+
+    private var runsCustomCommand: Bool {
+        modeManager.configurations.first { $0.id.uuidString == modeID }?.outputMode == .customCommand
+    }
+
+    // A deleted mode falls back to "Select Mode" instead of leaving the picker blank.
+    private var modeSelection: Binding<String> {
+        Binding(
+            get: { modeManager.configurations.contains { $0.id.uuidString == modeID } ? modeID : "" },
+            set: { modeID = $0 }
+        )
     }
 }
 

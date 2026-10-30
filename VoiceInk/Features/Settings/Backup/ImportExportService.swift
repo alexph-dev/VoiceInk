@@ -159,6 +159,7 @@ class ImportExportService {
             pasteLastEnhancementShortcut: ShortcutStore.shortcut(for: .pasteLastEnhancement).map(ShortcutBackup.init),
             retryLastTranscriptionShortcut: ShortcutStore.shortcut(for: .retryLastTranscription).map(
                 ShortcutBackup.init),
+            retryWithModeSlots: RetryModeSlot.all.map(RetryWithModeSlotBackup.init),
             cancelRecorderShortcut: ShortcutStore.shortcut(for: .cancelRecorder).map(ShortcutBackup.init),
             openHistoryWindowShortcut: ShortcutStore.shortcut(for: .openQuickHistory).map(ShortcutBackup.init),
             quickAddToDictionaryShortcut: ShortcutStore.shortcut(for: .quickAddToDictionary).map(ShortcutBackup.init),

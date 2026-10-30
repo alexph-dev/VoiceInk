@@ -104,6 +104,9 @@ enum BackupImporter {
         if let retryShortcut = general.retryLastTranscriptionShortcut {
             ShortcutStore.setShortcut(retryShortcut.shortcut, for: .retryLastTranscription)
         }
+        for slotBackup in general.retryWithModeSlots ?? [] {
+            slotBackup.restore()
+        }
         if let cancelShortcut = general.cancelRecorderShortcut {
             ShortcutStore.setShortcut(cancelShortcut.shortcut, for: .cancelRecorder)
         }

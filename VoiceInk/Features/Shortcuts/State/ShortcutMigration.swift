@@ -263,6 +263,8 @@ enum ShortcutMigration {
             return ["pasteLastEnhancement"]
         case .retryLastTranscription:
             return ["retryLastTranscription"]
+        case .retryLastTranscriptionWithMode:
+            return []
         case .cancelRecorder:
             return ["cancelRecorder"]
         case .openQuickHistory:
