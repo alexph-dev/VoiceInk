@@ -10,6 +10,12 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
         let baselineFieldText: String
         let pastedRange: NSRange
         let pastedText: String
+        /// Last non-blank text seen in the field. Sending a message clears the field, so the
+        /// final read can come back empty even though the user corrected the dictation first.
+        var latestFieldText: String?
+        var latestChangeAt: UInt64 = 0
+        /// Field text already handed to the review pipeline, so one edit is not submitted twice.
+        var submittedFieldText: String?
     }
 
     private let queue = DispatchQueue(label: "com.prakashjoshipax.voiceink.auto-learn.accessibility")
@@ -17,10 +23,33 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
         subsystem: "com.prakashjoshipax.voiceink",
         category: "AutoLearnCapture"
     )
-    private let textReader = AccessibilityTextReader(messagingTimeout: AutoLearnLimits.captureAccessibilityTimeoutSeconds)
+    private let textReader = AccessibilityTextReader(
+        messagingTimeout: AutoLearnLimits.captureAccessibilityTimeoutSeconds,
+        releasesWebAccessibilityWhenUnreadable: false
+    )
     private var session: Session?
 
-    func capturePastedText(text: String, processID: pid_t) async -> AutoLearnPasteToken? {
+    func prepareWebAccessibility(processID: pid_t) async -> AccessibilityTextReader.WebAccessibilityPreparation {
+        await perform { [self] in
+            guard AXIsProcessTrusted(), processID != ProcessInfo.processInfo.processIdentifier else {
+                return .unavailable
+            }
+            return textReader.prepareWebAccessibility(processID: processID)
+        }
+    }
+
+    /// Restores web accessibility once the hold after the last dictation into the app has passed.
+    func releaseWebAccessibility(processID: pid_t) async {
+        await perform { [self] in
+            if let active = session, AXProcessID(active.appElement) == processID { return }
+            textReader.restoreWebAccessibility(
+                processID: processID,
+                appElement: AXUIElementCreateApplication(processID)
+            )
+        }
+    }
+
+    func capturePastedText(text: String, processID: pid_t) async -> AutoLearnCaptureOutcome {
         await perform { [self] in
             session = nil
 
@@ -52,9 +81,9 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
             }
 
             guard let reading = matchedReading, let pastedRange else {
-                textReader.restoreWebAccessibility(processID: processID, appElement: AXUIElementCreateApplication(processID))
                 return rejectCapture(
-                    lastReading == nil ? "focused-text-reading-unavailable" : "pasted-range-invalid"
+                    lastReading == nil ? "focused-text-reading-unavailable" : "pasted-range-invalid",
+                    retryable: true
                 )
             }
 
@@ -74,7 +103,47 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
                 pastedRange: pastedRange,
                 pastedText: observedPastedText
             )
-            return token
+            logger.notice(
+                "Auto Learn capture ok source=\(reading.source, privacy: .public) focus=\(reading.focusSource, privacy: .public)"
+            )
+            return .captured(token)
+        }
+    }
+
+    /// Records the field's current text while the session runs.
+    func sampleField(token: AutoLearnPasteToken) async {
+        await perform { [self] in
+            guard var active = session, active.token == token,
+                let value = textReader.textValue(from: active.targetElement),
+                value.text.utf16.count <= AccessibilityTextReader.maximumFieldUTF16Length,
+                !value.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return }
+            if !(active.latestFieldText.map { textIsExactlyEqual($0, value.text) } ?? false) {
+                active.latestChangeAt = DispatchTime.now().uptimeNanoseconds
+            }
+            active.latestFieldText = value.text
+            session = active
+        }
+    }
+
+    /// Returns a snapshot of an edited field once the user has stopped typing, and keeps the session
+    /// running so later edits are still seen.
+    func interimSnapshot(token: AutoLearnPasteToken, idleNanoseconds: UInt64) async -> AutoLearnFieldSnapshot? {
+        await perform { [self] in
+            guard var active = session, active.token == token,
+                let latest = active.latestFieldText,
+                !textIsExactlyEqual(latest, active.baselineFieldText),
+                !(active.submittedFieldText.map { textIsExactlyEqual($0, latest) } ?? false),
+                DispatchTime.now().uptimeNanoseconds - active.latestChangeAt >= idleNanoseconds
+            else { return nil }
+            active.submittedFieldText = latest
+            session = active
+            return AutoLearnFieldSnapshot(
+                baselineFieldText: active.baselineFieldText,
+                finalFieldText: latest,
+                pastedRange: active.pastedRange,
+                originalPastedText: active.pastedText
+            )
         }
     }
 
@@ -83,9 +152,17 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
             guard let active = session, active.token == token else { return nil }
             session = nil
 
-            defer { textReader.restoreWebAccessibility(processID: AXProcessID(active.appElement), appElement: active.appElement) }
-            guard let finalTextValue = textReader.textValue(from: active.targetElement) else { return nil }
-            let finalFieldText = finalTextValue.text
+            let finalFieldText: String
+            if let finalTextValue = textReader.textValue(from: active.targetElement),
+                !finalTextValue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                finalFieldText = finalTextValue.text
+            } else if let latestFieldText = active.latestFieldText {
+                // The field was cleared or left the screen, usually because the message was sent.
+                finalFieldText = latestFieldText
+            } else {
+                return nil
+            }
             guard finalFieldText.utf16.count <= AccessibilityTextReader.maximumFieldUTF16Length else { return nil }
             guard !textIsExactlyEqual(finalFieldText, active.baselineFieldText) else { return nil }
 
@@ -108,9 +185,6 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
     func discard(token: AutoLearnPasteToken? = nil) async {
         await perform { [self] in
             guard token == nil || session?.token == token else { return }
-            if let active = session {
-                textReader.restoreWebAccessibility(processID: AXProcessID(active.appElement), appElement: active.appElement)
-            }
             session = nil
         }
     }
@@ -125,11 +199,9 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
         lhs.utf16.elementsEqual(rhs.utf16)
     }
 
-    private func rejectCapture(_ reason: String) -> AutoLearnPasteToken? {
-        logger.notice(
-            "Auto Learn capture rejected reason=\(reason, privacy: .public)"
-        )
-        return nil
+    private func rejectCapture(_ reason: String, retryable: Bool = false) -> AutoLearnCaptureOutcome {
+        logger.debug("Auto Learn capture attempt failed reason=\(reason, privacy: .public)")
+        return retryable ? .retry(reason: reason) : .rejected(reason: reason)
     }
 
     private func focusedElementMatches(_ targetElement: AXUIElement, in appElement: AXUIElement) -> Bool {

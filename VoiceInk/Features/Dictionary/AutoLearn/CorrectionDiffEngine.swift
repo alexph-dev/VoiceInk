@@ -46,6 +46,17 @@ enum CorrectionDiffEngine {
         ",", "!", "?", ";", ":", "…", "(", ")", "[", "]", "{", "}", "\"", "“", "”",
     ]
 
+    /// Tracks corrections across idle and final snapshots of one observation session.
+    static func candidates(from revision: AutoLearnRevision, excluding submitted: inout Set<String>)
+        -> [DetectedCorrectionCandidate]
+    {
+        candidates(from: revision).filter {
+            guard let pair = replacementPair(from: .init(original: $0.originalText, corrected: $0.correctedText))
+            else { return false }
+            return submitted.insert(pair.source + "\u{0}" + pair.destination).inserted
+        }
+    }
+
     static func candidates(from revision: AutoLearnRevision) -> [DetectedCorrectionCandidate] {
         let original = revision.original.precomposedStringWithCanonicalMapping
         let corrected = revision.corrected.precomposedStringWithCanonicalMapping
