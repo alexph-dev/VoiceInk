@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import OSLog
 import SwiftData
@@ -19,6 +20,9 @@ actor AutoLearnService {
     private var activeToken: AutoLearnPasteToken?
     private var deadlineTask: Task<Void, Never>?
     private var focusFinalizationTask: Task<Void, Never>?
+    private var sampleTask: Task<Void, Never>?
+    private var submittedCandidates = Set<String>()
+    private var webAccessibilityReleaseTasks: [pid_t: Task<Void, Never>] = [:]
     private var reviewTask: Task<Void, Never>?
     private var reviewGeneration: UInt64 = 0
     private var claimedCandidateIDs = Set<UUID>()
@@ -227,6 +231,7 @@ actor AutoLearnService {
         }
         lifecycleGeneration &+= 1
         await discardActiveSession()
+        await warmUpFrontmostApplication()
     }
 
     func pasteDidFinish(text: String, processID: pid_t?, commandPosted: Bool) async -> UInt64? {
@@ -276,6 +281,12 @@ actor AutoLearnService {
         await cancelReviewTask()
         await discardActiveSession()
         await suggestionsDidChange([])
+        let heldProcessIDs = Array(webAccessibilityReleaseTasks.keys)
+        webAccessibilityReleaseTasks.values.forEach { $0.cancel() }
+        webAccessibilityReleaseTasks = [:]
+        for processID in heldProcessIDs {
+            await accessibilityRuntime.releaseWebAccessibility(processID: processID)
+        }
     }
 
     func focusMayHaveChanged(token: AutoLearnPasteToken) {
@@ -297,11 +308,43 @@ actor AutoLearnService {
             isEnabled
         else { return }
 
-        guard let token = await accessibilityRuntime.capturePastedText(
-                text: text,
-                processID: processID
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        var attempts = 0
+        var capturedToken: AutoLearnPasteToken?
+        var failureReason = "unknown"
+        captureLoop: while true {
+            attempts += 1
+            switch await accessibilityRuntime.capturePastedText(text: text, processID: processID) {
+            case .captured(let captured):
+                capturedToken = captured
+                break captureLoop
+            case .rejected(let reason):
+                failureReason = reason
+                break captureLoop
+            case .retry(let reason):
+                // Web apps can need about two seconds to expose the field.
+                failureReason = reason
+                let elapsed = DispatchTime.now().uptimeNanoseconds - startedAt
+                guard elapsed < AutoLearnLimits.captureRetryWindowNanoseconds,
+                    await sleep(nanoseconds: AutoLearnLimits.captureRetryIntervalNanoseconds),
+                    !Task.isCancelled,
+                    lifecycleGeneration == generation,
+                    isEnabled
+                else { break captureLoop }
+            }
+        }
+
+        let bundleIdentifier = await bundleIdentifier(of: processID)
+        holdWebAccessibility(processID: processID)
+        guard let token = capturedToken else {
+            logger.notice(
+                "Auto Learn capture gave up reason=\(failureReason, privacy: .public) attempts=\(attempts, privacy: .public) app=\(bundleIdentifier, privacy: .public)"
             )
-        else { return }
+            return
+        }
+        logger.notice(
+            "Auto Learn capture started attempts=\(attempts, privacy: .public) app=\(bundleIdentifier, privacy: .public)"
+        )
 
         guard lifecycleGeneration == generation,
             !Task.isCancelled,
@@ -312,6 +355,8 @@ actor AutoLearnService {
         }
 
         activeToken = token
+        submittedCandidates = []
+        startSampling(token: token)
         focusObserver.start(processID: processID, token: token) { token in
             Task {
                 await AutoLearnService.shared.focusMayHaveChanged(token: token)
@@ -331,6 +376,8 @@ actor AutoLearnService {
         focusFinalizationTask?.cancel()
         focusFinalizationTask = nil
         focusObserver.stop()
+        sampleTask?.cancel()
+        sampleTask = nil
         activeToken = nil
         return token
     }
@@ -393,7 +440,8 @@ actor AutoLearnService {
         else { return }
 
         guard let revision = FinalSnapshotDiffEngine.revision(from: snapshot) else { return }
-        let candidates = CorrectionDiffEngine.candidates(from: revision)
+        // Edits already submitted from an earlier idle snapshot of the same session are skipped.
+        let candidates = CorrectionDiffEngine.candidates(from: revision, excluding: &submittedCandidates)
         guard !candidates.isEmpty else { return }
 
         do {
@@ -537,6 +585,74 @@ actor AutoLearnService {
             return true
         } catch {
             return false
+        }
+    }
+
+    /// Web apps need about two seconds to build their accessibility tree, so the app that will
+    /// receive the dictation is prepared as soon as recording starts.
+    private func warmUpFrontmostApplication() async {
+        let ownProcessID = ProcessInfo.processInfo.processIdentifier
+        guard let processID = await MainActor.run(body: {
+                NSWorkspace.shared.frontmostApplication?.processIdentifier
+            }),
+            processID != ownProcessID
+        else { return }
+
+        let preparation = await accessibilityRuntime.prepareWebAccessibility(processID: processID)
+        let bundleIdentifier = await bundleIdentifier(of: processID)
+        logger.notice(
+            "Auto Learn warm-up app=\(bundleIdentifier, privacy: .public) result=\(preparation.rawValue, privacy: .public)"
+        )
+        holdWebAccessibility(processID: processID)
+    }
+
+    /// Leaves web accessibility on for a while after each use, then restores the app's own setting.
+    private func holdWebAccessibility(processID: pid_t) {
+        webAccessibilityReleaseTasks[processID]?.cancel()
+        webAccessibilityReleaseTasks[processID] = Task { [weak self] in
+            guard let self,
+                await self.sleep(nanoseconds: AutoLearnLimits.webAccessibilityHoldNanoseconds),
+                !Task.isCancelled
+            else { return }
+            await self.releaseWebAccessibilityAfterHold(processID: processID)
+        }
+    }
+
+    private func releaseWebAccessibilityAfterHold(processID: pid_t) async {
+        webAccessibilityReleaseTasks[processID] = nil
+        await accessibilityRuntime.releaseWebAccessibility(processID: processID)
+    }
+
+    /// Keeps the last text seen in the field, and reviews an edit once it has been idle,
+    /// so a correction is learned even when sending the message clears the field.
+    private func startSampling(token: AutoLearnPasteToken) {
+        sampleTask?.cancel()
+        sampleTask = Task { [weak self] in
+            while let self,
+                await self.sleep(nanoseconds: AutoLearnLimits.fieldSampleIntervalNanoseconds),
+                !Task.isCancelled
+            {
+                guard await self.sampleIfActive(token: token) else { return }
+            }
+        }
+    }
+
+    private func sampleIfActive(token: AutoLearnPasteToken) async -> Bool {
+        guard activeToken == token, isEnabled else { return false }
+        await accessibilityRuntime.sampleField(token: token)
+        if let snapshot = await accessibilityRuntime.interimSnapshot(
+            token: token,
+            idleNanoseconds: AutoLearnLimits.editIdleNanoseconds
+        ) {
+            logger.notice("Auto Learn edit idle, reviewing without waiting for send")
+            await persistSnapshot(snapshot)
+        }
+        return true
+    }
+
+    private func bundleIdentifier(of processID: pid_t) async -> String {
+        await MainActor.run {
+            NSRunningApplication(processIdentifier: processID)?.bundleIdentifier ?? "unknown"
         }
     }
 }

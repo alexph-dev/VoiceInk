@@ -19,19 +19,36 @@ struct AccessibilityTextValue {
 /// activated on demand; no keyboard event tap or Input Monitoring is involved.
 final class AccessibilityTextReader {
     static let maximumFieldUTF16Length = 100_000
+
+    enum WebAccessibilityPreparation: String, Sendable {
+        case enabled
+        case alreadyEnabled
+        /// The app already exposes its focused element, as native apps do.
+        case notNeeded
+        case unavailable
+    }
+
     private let messagingTimeout: Float
     private let fieldMessagingTimeout: Float?
     private let readBudget: TimeInterval?
+    /// Auto Learn holds web accessibility across retries and dictations; one-shot readers release it.
+    private let releasesWebAccessibilityWhenUnreadable: Bool
     private var readDeadline: TimeInterval?
 
     private var canRead: Bool {
         readDeadline.map { ProcessInfo.processInfo.systemUptime < $0 } ?? true
     }
 
-    init(messagingTimeout: Float = 0.10, fieldMessagingTimeout: Float? = nil, readBudget: TimeInterval? = nil) {
+    init(
+        messagingTimeout: Float = 0.10,
+        fieldMessagingTimeout: Float? = nil,
+        readBudget: TimeInterval? = nil,
+        releasesWebAccessibilityWhenUnreadable: Bool = true
+    ) {
         self.messagingTimeout = messagingTimeout
         self.fieldMessagingTimeout = fieldMessagingTimeout
         self.readBudget = readBudget
+        self.releasesWebAccessibilityWhenUnreadable = releasesWebAccessibilityWhenUnreadable
     }
 
     private struct MarkerSnapshot {
@@ -49,6 +66,14 @@ final class AccessibilityTextReader {
     private static let stringForMarkerRangeAttribute = "AXStringForTextMarkerRange" as CFString
 
     private var webAccessibilityProcesses = Set<pid_t>()
+
+    /// Turns on web accessibility before the paste. Chromium and Electron build their
+    /// accessibility tree over about two seconds, so enabling it after the paste misses the field.
+    func prepareWebAccessibility(processID: pid_t) -> WebAccessibilityPreparation {
+        let appElement = AXUIElementCreateApplication(processID)
+        AXUIElementSetMessagingTimeout(appElement, messagingTimeout)
+        return enableWebAccessibilityIfNeeded(processID: processID, appElement: appElement)
+    }
 
     func focusedReadings(processID: pid_t, includeSystemFocus: Bool = true) -> [AccessibilityTextReading] {
         readDeadline = readBudget.map { ProcessInfo.processInfo.systemUptime + $0 }
@@ -88,7 +113,9 @@ final class AccessibilityTextReader {
             )
             readings.append(contentsOf: candidateReadings)
         }
-        if readings.isEmpty { restoreWebAccessibility(processID: processID, appElement: appElement) }
+        if readings.isEmpty, releasesWebAccessibilityWhenUnreadable {
+            restoreWebAccessibility(processID: processID, appElement: appElement)
+        }
         return canRead ? readings : []
     }
 
@@ -240,17 +267,29 @@ final class AccessibilityTextReader {
         )
     }
 
-    private func enableWebAccessibilityIfNeeded(processID: pid_t, appElement: AXUIElement) {
-        guard !webAccessibilityProcesses.contains(processID) else { return }
+    @discardableResult
+    private func enableWebAccessibilityIfNeeded(
+        processID: pid_t,
+        appElement: AXUIElement
+    ) -> WebAccessibilityPreparation {
+        guard !webAccessibilityProcesses.contains(processID) else { return .alreadyEnabled }
+        // Native apps, and web apps that already expose a focused element, need nothing.
+        guard AccessibilityFocusReader.focusedElement(in: appElement).element == nil else { return .notNeeded }
         let acquired = AccessibilityWebAccess.shared.acquire(processID: processID) {
-            var value: CFTypeRef?
-            let readError = AXUIElementCopyAttributeValue(appElement, Self.manualAccessibilityAttribute, &value)
-            guard readError == .success else { return .failed(readError) }
-            guard let previous = (value as? NSNumber)?.boolValue else { return .failed(.failure) }
-            let writeError = AXUIElementSetAttributeValue(appElement, Self.manualAccessibilityAttribute, kCFBooleanTrue)
-            return writeError == .success ? .enabled(previous: previous) : .failed(writeError)
+            // Use the same manual flag as upstream and only change a readable state,
+            // so release can restore it. Enhanced UI mode can disrupt window managers.
+            guard let previous = copyBool(Self.manualAccessibilityAttribute, from: appElement) else {
+                return .failed(.attributeUnsupported)
+            }
+            if !previous {
+                let error = AXUIElementSetAttributeValue(appElement, Self.manualAccessibilityAttribute, kCFBooleanTrue)
+                guard error == .success || error == .notImplemented else { return .failed(error) }
+            }
+            return .enabled(previous: previous)
         }
-        if acquired { webAccessibilityProcesses.insert(processID) }
+        guard acquired else { return .unavailable }
+        webAccessibilityProcesses.insert(processID)
+        return .enabled
     }
 
     private func appendUnique(

@@ -31,6 +31,13 @@ struct AutoLearnPasteToken: Hashable, Sendable {
     let id: UUID
 }
 
+enum AutoLearnCaptureOutcome: Sendable {
+    case captured(AutoLearnPasteToken)
+    /// The field may become readable shortly, for example while a web app builds its accessibility tree.
+    case retry(reason: String)
+    case rejected(reason: String)
+}
+
 struct AutoLearnRevision: Sendable {
     let original: String
     let corrected: String
@@ -100,6 +107,16 @@ struct AutoLearnReviewProposal: Codable, Identifiable, Sendable {
 enum AutoLearnLimits {
     static let observationDurationNanoseconds: UInt64 = 60_000_000_000
     static let verificationDelayNanoseconds: UInt64 = 120_000_000
+    /// Chromium and Electron need about two seconds to expose a text field after web accessibility is enabled.
+    static let captureRetryWindowNanoseconds: UInt64 = 3_000_000_000
+    static let captureRetryIntervalNanoseconds: UInt64 = 250_000_000
+    /// Keeps the last text seen in the field, so a message sent (field cleared) can still be diffed.
+    static let fieldSampleIntervalNanoseconds: UInt64 = 300_000_000
+    /// An edited field that stays unchanged this long is reviewed without waiting for send or the deadline.
+    static let editIdleNanoseconds: UInt64 = 5_000_000_000
+    /// Web accessibility stays on for this long after the last dictation into an app, so the next
+    /// dictation does not wait for the accessibility tree to be rebuilt.
+    static let webAccessibilityHoldNanoseconds: UInt64 = 600_000_000_000
     static let focusChangeGraceNanoseconds: UInt64 = 250_000_000
     static let accessibilityTimeoutSeconds: Float = 0.20
     static let captureAccessibilityTimeoutSeconds: Float = 0.10
