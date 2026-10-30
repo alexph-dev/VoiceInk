@@ -68,6 +68,7 @@ class FluidAudioTranscriptionService: TranscriptionService {
         try await manager.loadModels(models)
         self.asrManager = manager
         self.activeVersion = version
+        await ParakeetVocabularyBooster.shared.prepare()
     }
 
     private func ensureNemotronModelsLoaded(named modelName: String) async throws {
@@ -191,24 +192,23 @@ class FluidAudioTranscriptionService: TranscriptionService {
             model: model
         )
         var decoderState = TdtDecoderState.make(decoderLayers: await asrManager.decoderLayerCount)
-        let result: ASRResult
-        if UserDefaults.standard.bool(forKey: "IsVADEnabled") {
-            let speechAudio = try await preparedSpeechAudio(from: audioURL)
-            guard !speechAudio.isEmpty else { return "" }
-            result = try await asrManager.transcribe(
-                speechAudio,
-                decoderState: &decoderState,
-                language: languageHint
-            )
-        } else {
-            result = try await asrManager.transcribe(
-                audioURL,
-                decoderState: &decoderState,
-                language: languageHint
-            )
-        }
+        // Vocabulary boosting rescores against the exact samples the transcript was decoded from.
+        let samples = UserDefaults.standard.bool(forKey: "IsVADEnabled")
+            ? try await preparedSpeechAudio(from: audioURL)
+            : try loadAudioSamples(from: audioURL)
+        guard !samples.isEmpty else { return "" }
+        let result = try await asrManager.transcribe(
+            samples,
+            decoderState: &decoderState,
+            language: languageHint
+        )
 
-        return result.text
+        return await ParakeetVocabularyBooster.shared.rescore(
+            text: result.text,
+            tokenTimings: result.tokenTimings,
+            samples: samples,
+            vocabulary: context.vocabulary
+        )
     }
 
     private func loadAudioSamples(from audioURL: URL) throws -> [Float] {
